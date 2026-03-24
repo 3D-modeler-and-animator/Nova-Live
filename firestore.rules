@@ -89,6 +89,16 @@ service cloud.firestore {
       allow create: if true;
       allow update: if true;
       allow delete: if true;
+
+      match /calls/{callId} {
+        allow read, write: if true;
+        match /offerCandidates/{candidateId} {
+          allow read, write: if true;
+        }
+        match /answerCandidates/{candidateId} {
+          allow read, write: if true;
+        }
+      }
     }
 
     match /notes/{noteId} {

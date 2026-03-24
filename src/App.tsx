@@ -453,8 +453,20 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
   const [isMicOn, setIsMicOn] = useState(true);
   const [isEditing, setIsEditing] = useState(false);
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const peerConnection = useRef<RTCPeerConnection | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [participantId] = useState(() => Math.random().toString(36).substring(7));
+  const [isRemoteConnected, setIsRemoteConnected] = useState(false);
+
+  const servers = {
+    iceServers: [
+      {
+        urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
+      },
+    ],
+    iceCandidatePoolSize: 10,
+  };
 
   useEffect(() => {
     const sessionRef = doc(db, "sessions", sessionId);
@@ -476,38 +488,118 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
     const unsubscribeNote = onSnapshot(noteRef, (snapshot) => {
       if (snapshot.exists()) {
         setNote(snapshot.data() as Note);
-      } else {
-        // Initialize note
-        setDoc(noteRef, {
-          sessionId,
-          content: "# Session Notes\nStart writing here...",
-          updatedAt: serverTimestamp()
-        });
       }
     });
 
-    // Setup Media
-    const startMedia = async () => {
-      try {
-        const mediaStream = await navigator.mediaDevices.getUserMedia({ 
-          video: true, 
-          audio: true 
-        });
-        setStream(mediaStream);
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = mediaStream;
+    // WebRTC Setup
+    const setupWebRTC = async () => {
+      const pc = new RTCPeerConnection(servers);
+      peerConnection.current = pc;
+
+      // Get local stream
+      const localStream = await navigator.mediaDevices.getUserMedia({ 
+        video: true, 
+        audio: true 
+      });
+      setStream(localStream);
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = localStream;
+      }
+
+      // Add tracks to peer connection
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      // Listen for remote tracks
+      pc.ontrack = (event) => {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = event.streams[0];
+          setIsRemoteConnected(true);
         }
-      } catch (err) {
-        toast.error("Could not access camera/microphone");
+      };
+
+      // Signaling logic
+      const callDoc = doc(collection(db, "sessions", sessionId, "calls"), "signaling");
+      const offerCandidates = collection(callDoc, "offerCandidates");
+      const answerCandidates = collection(callDoc, "answerCandidates");
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          const candidatesCollection = pc.localDescription?.type === 'offer' ? offerCandidates : answerCandidates;
+          addDoc(candidatesCollection, event.candidate.toJSON());
+        }
+      };
+
+      // Determine role based on existing call doc
+      const callSnapshot = await getDoc(callDoc);
+      
+      if (!callSnapshot.exists()) {
+        // I am the caller
+        const offerDescription = await pc.createOffer();
+        await pc.setLocalDescription(offerDescription);
+
+        const offer = {
+          sdp: offerDescription.sdp,
+          type: offerDescription.type,
+        };
+
+        await setDoc(callDoc, { offer });
+
+        // Listen for answer
+        onSnapshot(callDoc, (snapshot) => {
+          const data = snapshot.data();
+          if (!pc.currentRemoteDescription && data?.answer) {
+            const answerDescription = new RTCSessionDescription(data.answer);
+            pc.setRemoteDescription(answerDescription);
+          }
+        });
+
+        // Listen for callee candidates
+        onSnapshot(answerCandidates, (snapshot) => {
+          snapshot.docChanges().forEach((change) => {
+            if (change.type === 'added') {
+              const data = change.doc.data();
+              pc.addIceCandidate(new RTCIceCandidate(data));
+            }
+          });
+        });
+      } else {
+        // I am the callee
+        const data = callSnapshot.data();
+        const offerDescription = data.offer;
+        await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
+
+        const answerDescription = await pc.createAnswer();
+        await pc.setLocalDescription(answerDescription);
+
+        const answer = {
+          type: answerDescription.type,
+          sdp: answerDescription.sdp,
+        };
+
+        await updateDoc(callDoc, { answer });
+
+        // Listen for caller candidates
+        onSnapshot(offerCandidates, (snapshot) => {
+          snapshot.docChanges().forEach((change) => {
+            if (change.type === 'added') {
+              const data = change.doc.data();
+              pc.addIceCandidate(new RTCIceCandidate(data));
+            }
+          });
+        });
       }
     };
-    startMedia();
+
+    setupWebRTC();
 
     return () => {
       unsubscribe();
       unsubscribeNote();
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
+      }
+      if (peerConnection.current) {
+        peerConnection.current.close();
       }
     };
   }, [sessionId, isAnonymous, participantId]);
@@ -568,14 +660,23 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
             )}
           </div>
 
-          {/* Remote Video Placeholder */}
+          {/* Remote Video */}
           <div className="relative bg-zinc-900 rounded-3xl overflow-hidden border border-zinc-800 shadow-2xl flex items-center justify-center">
-            <div className="text-center space-y-4">
-              <div className="w-20 h-20 bg-zinc-800 rounded-full flex items-center justify-center mx-auto">
-                <Users className="w-10 h-10 text-zinc-600" />
+            {isRemoteConnected ? (
+              <video 
+                ref={remoteVideoRef} 
+                autoPlay 
+                playsInline 
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <div className="text-center space-y-4">
+                <div className="w-20 h-20 bg-zinc-800 rounded-full flex items-center justify-center mx-auto">
+                  <Users className="w-10 h-10 text-zinc-600" />
+                </div>
+                <p className="text-zinc-500 font-medium">Waiting for participant...</p>
               </div>
-              <p className="text-zinc-500 font-medium">Waiting for participant...</p>
-            </div>
+            )}
             <div className="absolute bottom-4 left-4 bg-zinc-950/50 backdrop-blur-md px-3 py-1.5 rounded-full text-xs font-medium">
               Participant
             </div>
