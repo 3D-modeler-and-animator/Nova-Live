@@ -11,7 +11,8 @@ import {
   onSnapshot,
   updateDoc,
   serverTimestamp,
-  Timestamp
+  Timestamp,
+  deleteField
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { 
@@ -43,6 +44,7 @@ interface Session {
   adminId: string;
   participants: string[];
   createdAt: Timestamp;
+  activeCallId?: string;
 }
 
 interface Note {
@@ -470,6 +472,8 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
 
   useEffect(() => {
     const sessionRef = doc(db, "sessions", sessionId);
+    const noteRef = doc(db, "notes", sessionId);
+
     const unsubscribe = onSnapshot(sessionRef, (snapshot) => {
       if (snapshot.exists()) {
         const data = snapshot.data() as Session;
@@ -477,116 +481,147 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
         
         // Add self to participants if not already there AND not anonymous
         if (!isAnonymous && !data.participants.includes(participantId)) {
-          updateDoc(sessionRef, {
-            participants: [...data.participants, participantId]
-          });
+          const newParticipants = [...data.participants, participantId];
+          const updateData: any = { participants: newParticipants };
+          
+          // If I'm the first one, generate a new call ID
+          if (data.participants.length === 0) {
+            updateData.activeCallId = Math.random().toString(36).substring(2);
+          }
+          
+          updateDoc(sessionRef, updateData);
         }
       }
     });
 
-    const noteRef = doc(db, "notes", sessionId);
     const unsubscribeNote = onSnapshot(noteRef, (snapshot) => {
       if (snapshot.exists()) {
         setNote(snapshot.data() as Note);
+      } else {
+        // Initialize note if it doesn't exist
+        setDoc(noteRef, {
+          sessionId,
+          content: "# Session Notes\nStart writing here...",
+          updatedAt: serverTimestamp()
+        });
       }
     });
 
     // WebRTC Setup
     const setupWebRTC = async () => {
-      const pc = new RTCPeerConnection(servers);
-      peerConnection.current = pc;
+      try {
+        const pc = new RTCPeerConnection(servers);
+        peerConnection.current = pc;
 
-      // Get local stream
-      const localStream = await navigator.mediaDevices.getUserMedia({ 
-        video: true, 
-        audio: true 
-      });
-      setStream(localStream);
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = localStream;
-      }
-
-      // Add tracks to peer connection
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-      // Listen for remote tracks
-      pc.ontrack = (event) => {
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = event.streams[0];
-          setIsRemoteConnected(true);
+        // Get local stream
+        const localStream = await navigator.mediaDevices.getUserMedia({ 
+          video: true, 
+          audio: true 
+        });
+        setStream(localStream);
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = localStream;
         }
-      };
 
-      // Signaling logic
-      const callDoc = doc(collection(db, "sessions", sessionId, "calls"), "signaling");
-      const offerCandidates = collection(callDoc, "offerCandidates");
-      const answerCandidates = collection(callDoc, "answerCandidates");
+        // Add tracks to peer connection
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          const candidatesCollection = pc.localDescription?.type === 'offer' ? offerCandidates : answerCandidates;
-          addDoc(candidatesCollection, event.candidate.toJSON());
-        }
-      };
-
-      // Determine role based on existing call doc
-      const callSnapshot = await getDoc(callDoc);
-      
-      if (!callSnapshot.exists()) {
-        // I am the caller
-        const offerDescription = await pc.createOffer();
-        await pc.setLocalDescription(offerDescription);
-
-        const offer = {
-          sdp: offerDescription.sdp,
-          type: offerDescription.type,
-        };
-
-        await setDoc(callDoc, { offer });
-
-        // Listen for answer
-        onSnapshot(callDoc, (snapshot) => {
-          const data = snapshot.data();
-          if (!pc.currentRemoteDescription && data?.answer) {
-            const answerDescription = new RTCSessionDescription(data.answer);
-            pc.setRemoteDescription(answerDescription);
+        // Listen for remote tracks
+        pc.ontrack = (event) => {
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = event.streams[0];
+            setIsRemoteConnected(true);
           }
-        });
-
-        // Listen for callee candidates
-        onSnapshot(answerCandidates, (snapshot) => {
-          snapshot.docChanges().forEach((change) => {
-            if (change.type === 'added') {
-              const data = change.doc.data();
-              pc.addIceCandidate(new RTCIceCandidate(data));
-            }
-          });
-        });
-      } else {
-        // I am the callee
-        const data = callSnapshot.data();
-        const offerDescription = data.offer;
-        await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
-
-        const answerDescription = await pc.createAnswer();
-        await pc.setLocalDescription(answerDescription);
-
-        const answer = {
-          type: answerDescription.type,
-          sdp: answerDescription.sdp,
         };
 
-        await updateDoc(callDoc, { answer });
+        // Wait for session to have an activeCallId
+        let currentCallId: string | undefined;
+        const checkCallId = () => {
+          return new Promise<string>((resolve) => {
+            const unsub = onSnapshot(sessionRef, (snap) => {
+              const data = snap.data() as Session;
+              if (data?.activeCallId) {
+                unsub();
+                resolve(data.activeCallId);
+              }
+            });
+          });
+        };
 
-        // Listen for caller candidates
-        onSnapshot(offerCandidates, (snapshot) => {
-          snapshot.docChanges().forEach((change) => {
-            if (change.type === 'added') {
-              const data = change.doc.data();
-              pc.addIceCandidate(new RTCIceCandidate(data));
+        currentCallId = await checkCallId();
+        
+        const callDoc = doc(collection(db, "sessions", sessionId, "calls"), currentCallId);
+        const offerCandidates = collection(callDoc, "offerCandidates");
+        const answerCandidates = collection(callDoc, "answerCandidates");
+
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            const candidatesCollection = pc.localDescription?.type === 'offer' ? offerCandidates : answerCandidates;
+            addDoc(candidatesCollection, event.candidate.toJSON());
+          }
+        };
+
+        // Determine role: First participant is caller, second is callee
+        const sessionSnap = await getDoc(sessionRef);
+        const sessionData = sessionSnap.data() as Session;
+        const isCaller = sessionData.participants[0] === participantId;
+
+        if (isCaller) {
+          const offerDescription = await pc.createOffer();
+          await pc.setLocalDescription(offerDescription);
+
+          await setDoc(callDoc, { 
+            offer: { sdp: offerDescription.sdp, type: offerDescription.type } 
+          });
+
+          onSnapshot(callDoc, (snapshot) => {
+            const data = snapshot.data();
+            if (!pc.currentRemoteDescription && data?.answer) {
+              pc.setRemoteDescription(new RTCSessionDescription(data.answer));
             }
           });
-        });
+
+          onSnapshot(answerCandidates, (snapshot) => {
+            snapshot.docChanges().forEach((change) => {
+              if (change.type === 'added') {
+                pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+              }
+            });
+          });
+        } else {
+          // Callee: wait for offer
+          const waitForOffer = () => {
+            return new Promise<any>((resolve) => {
+              const unsub = onSnapshot(callDoc, (snap) => {
+                const data = snap.data();
+                if (data?.offer) {
+                  unsub();
+                  resolve(data.offer);
+                }
+              });
+            });
+          };
+
+          const offerDescription = await waitForOffer();
+          await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
+
+          const answerDescription = await pc.createAnswer();
+          await pc.setLocalDescription(answerDescription);
+
+          await updateDoc(callDoc, { 
+            answer: { type: answerDescription.type, sdp: answerDescription.sdp } 
+          });
+
+          onSnapshot(offerCandidates, (snapshot) => {
+            snapshot.docChanges().forEach((change) => {
+              if (change.type === 'added') {
+                pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+              }
+            });
+          });
+        }
+      } catch (err) {
+        console.error("WebRTC Setup Error:", err);
       }
     };
 
@@ -595,6 +630,22 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
     return () => {
       unsubscribe();
       unsubscribeNote();
+      
+      // Cleanup: remove self from participants
+      if (!isAnonymous) {
+        getDoc(sessionRef).then(snap => {
+          if (snap.exists()) {
+            const data = snap.data() as Session;
+            const newParticipants = data.participants.filter(id => id !== participantId);
+            const updateData: any = { participants: newParticipants };
+            if (newParticipants.length === 0) {
+              updateData.activeCallId = deleteField();
+            }
+            updateDoc(sessionRef, updateData);
+          }
+        });
+      }
+
       if (stream) {
         stream.getTracks().forEach(track => track.stop());
       }
