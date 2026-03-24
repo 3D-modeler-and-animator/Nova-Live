@@ -1,0 +1,5 @@
+{
+  "name": "NOVA LIVE MENTORSHIP APP",
+  "description": "A secure live mentorship platform for schools with shared notepad and admin supervision.",
+  "requestFramePermissions": ["camera", "microphone"]
+}

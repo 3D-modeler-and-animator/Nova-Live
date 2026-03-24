@@ -1,0 +1,100 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId (UID)
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - role: string (required, 'admin' or 'student')
+    //
+    // Collection: sessions
+    // Document ID: sessionId
+    // Fields:
+    //   - code: string (required, unique)
+    //   - status: string (required, 'active' or 'completed')
+    //   - adminId: string (required)
+    //   - participants: list (optional, list of UIDs)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: notes
+    // Document ID: sessionId (matches session ID)
+    // Fields:
+    //   - sessionId: string (required)
+    //   - content: string (required)
+    //   - updatedAt: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "astronomer291@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isParticipant(sessionId) {
+      let session = get(/databases/$(database)/documents/sessions/$(sessionId)).data;
+      return isAuthenticated() && (request.auth.uid in session.participants || session.adminId == request.auth.uid || isAdmin());
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.role in ['admin', 'student'];
+    }
+
+    function isValidSession(data) {
+      return data.keys().hasAll(['code', 'status', 'adminId', 'createdAt']) &&
+             data.code is string && data.code.size() == 6 &&
+             data.status in ['active', 'completed'] &&
+             data.adminId is string &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidNote(data) {
+      return data.keys().hasAll(['sessionId', 'content', 'updatedAt']) &&
+             data.sessionId is string &&
+             data.content is string && data.content.size() < 10000 &&
+             data.updatedAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    match /sessions/{sessionId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
+      allow delete: if true;
+    }
+
+    match /notes/{noteId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if true;
+    }
+  }
+}

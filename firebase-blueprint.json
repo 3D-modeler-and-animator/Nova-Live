@@ -1,0 +1,92 @@
+{
+  "entities": {
+    "Session": {
+      "title": "Session",
+      "description": "A live mentorship session identified by a unique code.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "The unique 6-digit code for the session."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "completed"],
+          "description": "Current status of the session."
+        },
+        "adminId": {
+          "type": "string",
+          "description": "The UID of the admin who created the session."
+        },
+        "participants": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of user UIDs currently in the session."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the session was created."
+        }
+      },
+      "required": ["code", "status", "adminId", "createdAt"]
+    },
+    "Note": {
+      "title": "Note",
+      "description": "Shared notepad content for a specific session.",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "The ID of the session this note belongs to."
+        },
+        "content": {
+          "type": "string",
+          "description": "The markdown or plain text content of the notepad."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last time the note was edited."
+        }
+      },
+      "required": ["sessionId", "content", "updatedAt"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User profile and role information.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User's email address."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "student"],
+          "description": "The role assigned to the user."
+        }
+      },
+      "required": ["uid", "email", "role"]
+    }
+  },
+  "firestore": {
+    "/sessions/{sessionId}": {
+      "schema": "Session",
+      "description": "Collection of mentorship sessions."
+    },
+    "/notes/{noteId}": {
+      "schema": "Note",
+      "description": "Shared notes for sessions."
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles and roles."
+    }
+  }
+}
