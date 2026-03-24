@@ -10,6 +10,7 @@ import {
   getDocs, 
   onSnapshot,
   updateDoc,
+  deleteDoc,
   serverTimestamp,
   Timestamp,
   deleteField
@@ -28,7 +29,8 @@ import {
   VideoOff,
   ClipboardList,
   ArrowRight,
-  Loader2
+  Loader2,
+  Trash2
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Toaster, toast } from "sonner";
@@ -295,6 +297,17 @@ function AdminDashboard({ onJoinSession }: { onJoinSession: (id: string) => void
     }
   };
 
+  const deleteSession = async (id: string) => {
+    if (window.confirm("Are you sure you want to delete this session code?")) {
+      try {
+        await deleteDoc(doc(db, "sessions", id));
+        toast.success("Session deleted");
+      } catch (err) {
+        toast.error("Failed to delete session");
+      }
+    }
+  };
+
   return (
     <motion.div 
       initial={{ opacity: 0, y: 20 }}
@@ -362,11 +375,20 @@ function AdminDashboard({ onJoinSession }: { onJoinSession: (id: string) => void
                       <p className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Session Code</p>
                       <p className="text-2xl font-mono font-bold text-orange-500">{session.code}</p>
                     </div>
-                    <div className={cn(
-                      "px-2 py-1 rounded text-[10px] font-bold uppercase",
-                      session.status === "active" ? "bg-green-500/10 text-green-500" : "bg-zinc-800 text-zinc-500"
-                    )}>
-                      {session.status}
+                    <div className="flex items-center gap-2">
+                      <div className={cn(
+                        "px-2 py-1 rounded text-[10px] font-bold uppercase",
+                        session.status === "active" ? "bg-green-500/10 text-green-500" : "bg-zinc-800 text-zinc-500"
+                      )}>
+                        {session.status}
+                      </div>
+                      <button 
+                        onClick={() => deleteSession(session.id)}
+                        className="p-2 text-zinc-500 hover:text-red-500 transition-colors"
+                        title="Delete session"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                   </div>
                   <div className="flex items-center justify-between pt-4 border-t border-zinc-800">
@@ -420,13 +442,22 @@ function AdminDashboard({ onJoinSession }: { onJoinSession: (id: string) => void
                       </p>
                     </div>
                   </div>
-                  <button 
-                    onClick={() => onJoinSession(session.id)}
-                    className="bg-zinc-800 hover:bg-orange-500 text-zinc-100 hover:text-white px-5 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center gap-2"
-                  >
-                    <Video className="w-4 h-4" />
-                    Join Anonymously
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button 
+                      onClick={() => deleteSession(session.id)}
+                      className="p-2.5 bg-zinc-800 hover:bg-red-500 text-zinc-400 hover:text-white rounded-xl transition-all"
+                      title="Delete session"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={() => onJoinSession(session.id)}
+                      className="bg-zinc-800 hover:bg-orange-500 text-zinc-100 hover:text-white px-5 py-2.5 rounded-xl text-sm font-bold transition-all flex items-center gap-2"
+                    >
+                      <Video className="w-4 h-4" />
+                      Join Anonymously
+                    </button>
+                  </div>
                 </div>
               ))}
               {allSessions.length === 0 && (
@@ -445,6 +476,25 @@ function AdminDashboard({ onJoinSession }: { onJoinSession: (id: string) => void
 
 // --- Session View ---
 
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 function SessionView({ sessionId, onLeave, isAnonymous }: { 
   sessionId: string, 
   onLeave: () => void, 
@@ -460,6 +510,7 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [participantId] = useState(() => Math.random().toString(36).substring(7));
   const [isRemoteConnected, setIsRemoteConnected] = useState(false);
+  const [isFirstParticipant, setIsFirstParticipant] = useState(false);
 
   const servers = {
     iceServers: [
@@ -489,10 +540,15 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
             updateData.activeCallId = Math.random().toString(36).substring(2);
           }
           
-          updateDoc(sessionRef, updateData);
+          updateDoc(sessionRef, updateData).catch(err => handleFirestoreError(err, OperationType.UPDATE, sessionRef.path));
+        }
+
+        // Determine if I am the first participant for grid layout
+        if (data.participants.length > 0) {
+          setIsFirstParticipant(data.participants[0] === participantId);
         }
       }
-    });
+    }, (err) => handleFirestoreError(err, OperationType.GET, sessionRef.path));
 
     const unsubscribeNote = onSnapshot(noteRef, (snapshot) => {
       if (snapshot.exists()) {
@@ -503,9 +559,9 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
           sessionId,
           content: "# Session Notes\nStart writing here...",
           updatedAt: serverTimestamp()
-        });
+        }).catch(err => handleFirestoreError(err, OperationType.WRITE, noteRef.path));
       }
-    });
+    }, (err) => handleFirestoreError(err, OperationType.GET, noteRef.path));
 
     // WebRTC Setup
     const setupWebRTC = async () => {
@@ -514,10 +570,18 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
         peerConnection.current = pc;
 
         // Get local stream
-        const localStream = await navigator.mediaDevices.getUserMedia({ 
-          video: true, 
-          audio: true 
-        });
+        let localStream: MediaStream;
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ 
+            video: true, 
+            audio: true 
+          });
+        } catch (mediaErr) {
+          console.error("Media Access Error:", mediaErr);
+          toast.error("Camera/Microphone access denied. Please allow permissions in your browser.");
+          return;
+        }
+        
         setStream(localStream);
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = localStream;
@@ -537,32 +601,51 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
         // Wait for session to have an activeCallId
         let currentCallId: string | undefined;
         const checkCallId = () => {
-          return new Promise<string>((resolve) => {
+          return new Promise<string>((resolve, reject) => {
             const unsub = onSnapshot(sessionRef, (snap) => {
               const data = snap.data() as Session;
               if (data?.activeCallId) {
                 unsub();
                 resolve(data.activeCallId);
               }
+            }, (err) => {
+              unsub();
+              reject(err);
             });
           });
         };
 
-        currentCallId = await checkCallId();
+        try {
+          currentCallId = await checkCallId();
+        } catch (err) {
+          handleFirestoreError(err, OperationType.GET, sessionRef.path);
+          return;
+        }
         
         const callDoc = doc(collection(db, "sessions", sessionId, "calls"), currentCallId);
         const offerCandidates = collection(callDoc, "offerCandidates");
         const answerCandidates = collection(callDoc, "answerCandidates");
 
-        pc.onicecandidate = (event) => {
+        pc.onicecandidate = async (event) => {
           if (event.candidate) {
             const candidatesCollection = pc.localDescription?.type === 'offer' ? offerCandidates : answerCandidates;
-            addDoc(candidatesCollection, event.candidate.toJSON());
+            try {
+              await addDoc(candidatesCollection, event.candidate.toJSON());
+            } catch (err) {
+              handleFirestoreError(err, OperationType.WRITE, candidatesCollection.path);
+            }
           }
         };
 
         // Determine role: First participant is caller, second is callee
-        const sessionSnap = await getDoc(sessionRef);
+        let sessionSnap;
+        try {
+          sessionSnap = await getDoc(sessionRef);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.GET, sessionRef.path);
+          return;
+        }
+        
         const sessionData = sessionSnap.data() as Session;
         const isCaller = sessionData.participants[0] === participantId;
 
@@ -570,16 +653,20 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
           const offerDescription = await pc.createOffer();
           await pc.setLocalDescription(offerDescription);
 
-          await setDoc(callDoc, { 
-            offer: { sdp: offerDescription.sdp, type: offerDescription.type } 
-          });
+          try {
+            await setDoc(callDoc, { 
+              offer: { sdp: offerDescription.sdp, type: offerDescription.type } 
+            });
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, callDoc.path);
+          }
 
           onSnapshot(callDoc, (snapshot) => {
             const data = snapshot.data();
             if (!pc.currentRemoteDescription && data?.answer) {
               pc.setRemoteDescription(new RTCSessionDescription(data.answer));
             }
-          });
+          }, (err) => handleFirestoreError(err, OperationType.GET, callDoc.path));
 
           onSnapshot(answerCandidates, (snapshot) => {
             snapshot.docChanges().forEach((change) => {
@@ -587,30 +674,44 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
                 pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
               }
             });
-          });
+          }, (err) => handleFirestoreError(err, OperationType.GET, answerCandidates.path));
         } else {
           // Callee: wait for offer
           const waitForOffer = () => {
-            return new Promise<any>((resolve) => {
+            return new Promise<any>((resolve, reject) => {
               const unsub = onSnapshot(callDoc, (snap) => {
                 const data = snap.data();
                 if (data?.offer) {
                   unsub();
                   resolve(data.offer);
                 }
+              }, (err) => {
+                unsub();
+                reject(err);
               });
             });
           };
 
-          const offerDescription = await waitForOffer();
+          let offerDescription;
+          try {
+            offerDescription = await waitForOffer();
+          } catch (err) {
+            handleFirestoreError(err, OperationType.GET, callDoc.path);
+            return;
+          }
+          
           await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
 
           const answerDescription = await pc.createAnswer();
           await pc.setLocalDescription(answerDescription);
 
-          await updateDoc(callDoc, { 
-            answer: { type: answerDescription.type, sdp: answerDescription.sdp } 
-          });
+          try {
+            await updateDoc(callDoc, { 
+              answer: { type: answerDescription.type, sdp: answerDescription.sdp } 
+            });
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, callDoc.path);
+          }
 
           onSnapshot(offerCandidates, (snapshot) => {
             snapshot.docChanges().forEach((change) => {
@@ -618,7 +719,7 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
                 pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
               }
             });
-          });
+          }, (err) => handleFirestoreError(err, OperationType.GET, offerCandidates.path));
         }
       } catch (err) {
         console.error("WebRTC Setup Error:", err);
@@ -691,46 +792,94 @@ function SessionView({ sessionId, onLeave, isAnonymous }: {
       {/* Video Grid */}
       <div className="flex-1 flex flex-col gap-4">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 flex-1">
-          {/* Local Video */}
+          {/* Slot 1: First Participant or Remote if I'm Second */}
           <div className="relative bg-zinc-900 rounded-3xl overflow-hidden border border-zinc-800 shadow-2xl group">
-            <video 
-              ref={localVideoRef} 
-              autoPlay 
-              muted 
-              playsInline 
-              className="w-full h-full object-cover mirror"
-            />
-            <div className="absolute bottom-4 left-4 bg-zinc-950/50 backdrop-blur-md px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2">
-              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-              {isAnonymous ? "Supervisor (Incognito)" : "You"}
-            </div>
-            {!isMicOn && (
-              <div className="absolute top-4 right-4 bg-red-500 p-2 rounded-full shadow-lg">
-                <MicOff className="w-4 h-4 text-white" />
-              </div>
+            {isFirstParticipant ? (
+              <>
+                <video 
+                  ref={localVideoRef} 
+                  autoPlay 
+                  muted 
+                  playsInline 
+                  className="w-full h-full object-cover mirror"
+                />
+                <div className="absolute bottom-4 left-4 bg-zinc-950/50 backdrop-blur-md px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2">
+                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                  {isAnonymous ? "Supervisor (Incognito)" : "You"}
+                </div>
+                {!isMicOn && (
+                  <div className="absolute top-4 right-4 bg-red-500 p-2 rounded-full shadow-lg">
+                    <MicOff className="w-4 h-4 text-white" />
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {isRemoteConnected ? (
+                  <video 
+                    ref={remoteVideoRef} 
+                    autoPlay 
+                    playsInline 
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="text-center space-y-4 h-full flex flex-col items-center justify-center">
+                    <div className="w-20 h-20 bg-zinc-800 rounded-full flex items-center justify-center mx-auto">
+                      <Users className="w-10 h-10 text-zinc-600" />
+                    </div>
+                    <p className="text-zinc-500 font-medium">Waiting for participant...</p>
+                  </div>
+                )}
+                <div className="absolute bottom-4 left-4 bg-zinc-950/50 backdrop-blur-md px-3 py-1.5 rounded-full text-xs font-medium">
+                  Participant 1
+                </div>
+              </>
             )}
           </div>
 
-          {/* Remote Video */}
-          <div className="relative bg-zinc-900 rounded-3xl overflow-hidden border border-zinc-800 shadow-2xl flex items-center justify-center">
-            {isRemoteConnected ? (
-              <video 
-                ref={remoteVideoRef} 
-                autoPlay 
-                playsInline 
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <div className="text-center space-y-4">
-                <div className="w-20 h-20 bg-zinc-800 rounded-full flex items-center justify-center mx-auto">
-                  <Users className="w-10 h-10 text-zinc-600" />
+          {/* Slot 2: Second Participant or Local if I'm Second */}
+          <div className="relative bg-zinc-900 rounded-3xl overflow-hidden border border-zinc-800 shadow-2xl group">
+            {!isFirstParticipant ? (
+              <>
+                <video 
+                  ref={localVideoRef} 
+                  autoPlay 
+                  muted 
+                  playsInline 
+                  className="w-full h-full object-cover mirror"
+                />
+                <div className="absolute bottom-4 left-4 bg-zinc-950/50 backdrop-blur-md px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-2">
+                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                  {isAnonymous ? "Supervisor (Incognito)" : "You"}
                 </div>
-                <p className="text-zinc-500 font-medium">Waiting for participant...</p>
-              </div>
+                {!isMicOn && (
+                  <div className="absolute top-4 right-4 bg-red-500 p-2 rounded-full shadow-lg">
+                    <MicOff className="w-4 h-4 text-white" />
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {isRemoteConnected ? (
+                  <video 
+                    ref={remoteVideoRef} 
+                    autoPlay 
+                    playsInline 
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="text-center space-y-4 h-full flex flex-col items-center justify-center">
+                    <div className="w-20 h-20 bg-zinc-800 rounded-full flex items-center justify-center mx-auto">
+                      <Users className="w-10 h-10 text-zinc-600" />
+                    </div>
+                    <p className="text-zinc-500 font-medium">Waiting for participant...</p>
+                  </div>
+                )}
+                <div className="absolute bottom-4 left-4 bg-zinc-950/50 backdrop-blur-md px-3 py-1.5 rounded-full text-xs font-medium">
+                  Participant 2
+                </div>
+              </>
             )}
-            <div className="absolute bottom-4 left-4 bg-zinc-950/50 backdrop-blur-md px-3 py-1.5 rounded-full text-xs font-medium">
-              Participant
-            </div>
           </div>
         </div>
 
